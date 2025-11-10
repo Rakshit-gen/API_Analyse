@@ -1,0 +1,26 @@
+{
+  "issue_description": "Getting 401 Unauthorized error when trying to create a new user",
+  "api_request": {
+    "method": "POST",
+    "url": "https://api.example.com/v1/users",
+    "headers": {
+      "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyLCJleHAiOjE1MTYyMzkwMjJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    },
+    "body": {
+      "username": "johndoe",
+      "email": "john@example.com",
+      "full_name": "John Doe"
+    }
+  },
+  "api_response": {
+    "status_code": 401,
+    "headers": {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": "Bearer error=\"invalid_token\""
+    },
+    "body": "{\"error\": \"invalid_token\", \"error_description\": \"The access token expired\"}"
+  },
+  "auth_type": "bearer"
+}
