@@ -1,463 +1,144 @@
-# API Integration Debugger
+# API_Analyse
 
-A multi-agent system built with LangGraph for debugging API integration issues. It uses specialized agents to analyze requests, responses, authentication, and schemas, then generates actionable fixes.
+You have an API call that fails. You paste in what you sent, what came back and a sentence about the problem. A small team of LLM agents looks at the request, the response, the auth and the schema, then writes up the likely root cause and a fix with code.
 
-## Features
+Built with LangGraph, FastAPI and Llama 3.3 70B on Groq. There is a web front end at https://api-analyse-fe.vercel.app ([source](https://github.com/Rakshit-gen/api_analyse_fe)) and a terminal version in `main.py`.
 
-- 6 specialized AI agents working together
-- HTTP request and response analysis
-- JWT, OAuth2, and API key debugging
-- OpenAPI and JSON schema validation
-- Real HTTP request testing
-- Streaming agent progress
-- FastAPI backend
-- CLI interface
-- Type-safe request handling
-- CORS support
-- Cloud deployment support
+## How it works
 
-## Architecture
+The agents are nodes in a LangGraph graph. A supervisor node sits in the middle and every other node hands control back to it.
 
-```text
-User Request
-     │
-     ▼
-Supervisor Agent
-     │
-     ├───────────────┬────────────────┐
-     ▼               ▼                ▼
-Request Analyzer  Response Parser  Auth Troubleshooter
-     │               │                │
-     └───────────────┼────────────────┘
-                     ▼
-              Schema Validator
-                     │
-                     ▼
-             Solution Generator
-                     │
-                     ▼
-               Final Solution
-````
+```
+            +-----------------+
+   start -> |   supervisor    | -> FINISH
+            +-----------------+
+              |   ^     ^   |
+              v   |     |   v
+  request_analyzer   response_parser   auth_troubleshooter   schema_validator
+              \           |                  |                 /
+               +----------+---- solution_generator -----------+
+```
 
-### Agents
+The supervisor's routing is plain rules, not a model call:
 
-1. **Supervisor Agent**
-   Routes the debugging workflow to the appropriate specialized agents.
+1. If a solution exists, finish.
+2. If two analyses are done, go to `solution_generator`.
+3. Otherwise run the first one that applies and has not run yet:
+   - `request_analyzer` if you sent a request
+   - `response_parser` if you sent a response
+   - `auth_troubleshooter` if the status was 401 or 403
+   - `schema_validator` if you sent an OpenAPI spec
+4. If none apply, go straight to `solution_generator`.
 
-2. **Request Analyzer**
-   Checks HTTP methods, headers, request bodies, URLs, and request structure.
+Keeping routing in code means a run always ends, in at most four steps, and you can predict which agents ran.
 
-3. **Response Parser**
-   Analyzes HTTP status codes, response bodies, error messages, and API failures.
+What each agent does:
 
-4. **Auth Troubleshooter**
-   Debugs authentication issues involving JWT, OAuth2, and API keys.
+| Agent | Looks at | Notes |
+|---|---|---|
+| `request_analyzer` | method, URL, headers, body | Flags missing content type, wrong method and the like |
+| `response_parser` | status code, body, error text | Explains what the server is complaining about |
+| `auth_troubleshooter` | auth type, `Authorization` header, status | Decodes a bearer JWT locally and adds its claims and expiry to the result |
+| `schema_validator` | request and response vs. your OpenAPI spec | Only runs when you pass a spec |
+| `solution_generator` | everything above | Writes the root cause and numbered fix steps |
 
-5. **Schema Validator**
-   Validates request and response structures against JSON Schema and OpenAPI definitions.
+`tools/` holds LangChain tools for making HTTP requests, decoding JWTs, validating JSON Schema and reading OpenAPI specs. They are bound to the agents, but today only the JWT decoder is actually called during a run. The HTTP tool is used by `/test-request`.
 
-6. **Solution Generator**
-   Combines the analysis from previous agents and produces an actionable solution with code examples.
+## Quickstart
 
-## Tools
-
-The agents use specialized tools during debugging:
-
-* `make_http_request` for executing HTTP requests
-* `decode_jwt_token` for inspecting JWT payloads and claims
-* `validate_json_schema` for JSON schema validation
-* `parse_openapi_spec` for extracting OpenAPI definitions
-* `test_oauth_flow` for OAuth2 flow testing
-
-## Tech Stack
-
-* Python 3.11+
-* LangGraph
-* FastAPI
-* Groq
-* Llama 3.3 70B
-* Pydantic
-* JWT
-* OpenAPI
-* JSON Schema
-
-## Quick Start
-
-### Prerequisites
-
-* Python 3.11+
-* Groq API key
-
-Get a Groq API key from [Groq Console](https://console.groq.com).
-
-### Installation
+You need Python 3.11+ and a [Groq API key](https://console.groq.com/keys).
 
 ```bash
 git clone https://github.com/Rakshit-gen/API_Analyse.git
 cd API_Analyse
-
-python -m venv venv
-source venv/bin/activate
-```
-
-On Windows:
-
-```bash
-venv\Scripts\activate
-```
-
-Install dependencies:
-
-```bash
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+echo "GROQ_API_KEY=gsk_..." > .env
+uvicorn api.main:app --reload
 ```
 
-Create the environment file:
+Then send it a problem:
 
 ```bash
-cp .env.example .env
+curl -X POST http://localhost:8000/debug \
+  -H "Content-Type: application/json" \
+  -d @examples/example_request.json
 ```
 
-Add your Groq API key:
+Or use the interactive terminal version: `python main.py`.
 
-```env
-GROQ_API_KEY=your_actual_groq_api_key
-MODEL_NAME=llama-3.3-70b-versatile
-TEMPERATURE=0.1
-MAX_TOKENS=2000
-PORT=8000
-HOST=0.0.0.0
-```
+## API
 
-## Running the API
-
-Start the FastAPI server:
-
-```bash
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
-
-Or:
-
-```bash
-cd api
-python main.py
-```
-
-API:
-
-```text
-http://localhost:8000
-```
-
-Swagger documentation:
-
-```text
-http://localhost:8000/docs
-```
-
-## CLI
-
-The project also includes an interactive CLI:
-
-```bash
-python main.py
-```
-
-Follow the prompts to describe the API issue and provide the request and response details.
-
-## API Endpoints
-
-### POST `/debug`
-
-Main debugging endpoint.
-
-#### Request
+### `POST /debug`
 
 ```json
 {
-  "issue_description": "Getting 401 error when calling the API",
+  "issue_description": "Getting 401 when creating a user",
   "api_request": {
     "method": "POST",
     "url": "https://api.example.com/users",
-    "headers": {
-      "Authorization": "Bearer token123",
-      "Content-Type": "application/json"
-    },
-    "body": {
-      "name": "John Doe",
-      "email": "john@example.com"
-    }
+    "headers": {"Authorization": "Bearer eyJ...", "Content-Type": "application/json"},
+    "body": {"name": "John"}
   },
-  "api_response": {
-    "status_code": 401,
-    "body": "{\"error\": \"Invalid token\"}"
-  },
+  "api_response": {"status_code": 401, "body": "{\"error\": \"Invalid token\"}"},
   "auth_type": "bearer"
 }
 ```
 
-#### Response
+Only `issue_description` is required. `openapi_spec` and `auth_credentials` are optional too.
+
+Response:
 
 ```json
 {
-  "root_cause": "JWT token is expired",
-  "solution": "1. Request a new access token...\n2. Update your authorization header...",
+  "root_cause": "Authentication failed: the JWT expired at ...",
+  "solution": "1. Request a new access token ...\n2. ...",
   "analysis_results": {
-    "request_analysis": {},
-    "response_analysis": {},
-    "auth_analysis": {}
+    "request_analysis": {"...": "..."},
+    "auth_analysis": {"jwt_details": {"...": "..."}, "diagnosis": "..."}
   },
   "status": "completed"
 }
 ```
 
-### POST `/test-request`
+### `POST /test-request`
 
-Executes an API request through the debugging service.
+Sends the request you describe (`method`, `url`, `headers`, `body`, `params`) from the server and returns the result. Useful to check a fix.
 
-#### Request
+### `GET /health`
 
-```json
-{
-  "method": "GET",
-  "url": "https://api.example.com/users",
-  "headers": {
-    "Authorization": "Bearer token123"
-  }
-}
+`{"status": "healthy", "service": "api-debugger"}`
+
+## Configuration
+
+| Variable | Default | What it does |
+|---|---|---|
+| `GROQ_API_KEY` | required | Groq key |
+| `MODEL_NAME` | `llama-3.3-70b-versatile` | Model for all agents |
+| `TEMPERATURE` | `0.1` | Sampling temperature |
+| `MAX_TOKENS` | `2000` | Max tokens per reply |
+| `HOST` / `PORT` | `0.0.0.0` / `8000` | Only used by `python api/main.py` |
+
+## Deploy
+
+`render.yaml` is ready for Render. Create a Blueprint from the repo and set `GROQ_API_KEY`.
+
+## Layout
+
+```
+api/main.py       FastAPI app
+main.py           interactive CLI
+graph/workflow.py LangGraph wiring
+graph/state.py    shared state passed between nodes
+agents/           supervisor and the five specialists
+tools/            HTTP, JWT and schema tools
+config.py         settings from env
 ```
 
-### GET `/health`
+## Limits
 
-Health check endpoint.
-
-#### Response
-
-```json
-{
-  "status": "healthy",
-  "service": "api-debugger"
-}
-```
-
-## Example Scenarios
-
-### Expired JWT
-
-```bash
-curl -X POST http://localhost:8000/debug \
-  -H "Content-Type: application/json" \
-  -d '{
-    "issue_description": "Getting 401 unauthorized error",
-    "api_response": {
-      "status_code": 401,
-      "body": "Token expired"
-    },
-    "auth_type": "bearer"
-  }'
-```
-
-The system analyzes the response and authentication configuration, identifies the likely JWT expiration issue, and suggests the required fix.
-
-### Schema Validation Error
-
-```bash
-curl -X POST http://localhost:8000/debug \
-  -H "Content-Type: application/json" \
-  -d '{
-    "issue_description": "API returns 400 bad request",
-    "api_request": {
-      "method": "POST",
-      "url": "https://api.example.com/users",
-      "body": {
-        "name": "John",
-        "age": "twenty"
-      }
-    },
-    "api_response": {
-      "status_code": 400,
-      "body": "Invalid age format"
-    }
-  }'
-```
-
-The schema validator identifies the type mismatch and the solution generator produces a corrected request.
-
-### CORS Error
-
-```bash
-curl -X POST http://localhost:8000/debug \
-  -H "Content-Type: application/json" \
-  -d '{
-    "issue_description": "CORS error in browser console",
-    "api_response": {
-      "error": "CORS policy blocked"
-    }
-  }'
-```
-
-The system analyzes the error and identifies the likely CORS configuration issue.
-
-## Frontend Integration
-
-The backend exposes a REST API designed to work as a standalone microservice.
-
-A frontend can:
-
-1. Send an API issue to `/debug`
-2. Stream agent progress
-3. Display individual analysis results
-4. Show the detected root cause
-5. Display the generated solution
-6. Test API requests through `/test-request`
-
-Example:
-
-```javascript
-const response = await fetch("http://localhost:8000/debug", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json"
-  },
-  body: JSON.stringify({
-    issue_description: userInput,
-    api_request: requestData,
-    api_response: responseData
-  })
-});
-
-const result = await response.json();
-
-console.log(result.root_cause);
-console.log(result.solution);
-```
-
-## Project Structure
-
-```text
-API_Analyse/
-├── agents/
-│   ├── supervisor.py
-│   ├── request_analyzer.py
-│   ├── response_parser.py
-│   ├── auth_troubleshooter.py
-│   ├── schema_validator.py
-│   └── solution_generator.py
-│
-├── graph/
-│   ├── state.py
-│   └── workflow.py
-│
-├── tools/
-│   ├── http_client.py
-│   ├── jwt_decoder.py
-│   └── schema_validator_tool.py
-│
-├── api/
-│   └── main.py
-│
-├── config.py
-├── main.py
-├── requirements.txt
-└── README.md
-```
-
-## Deployment
-
-The service is designed for deployment on platforms such as Render.
-
-Create `render.yaml`:
-
-```yaml
-services:
-  - type: web
-    name: api-debugger
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: GROQ_API_KEY
-        sync: false
-      - key: PYTHON_VERSION
-        value: 3.11.0
-```
-
-Push the repository to GitHub, create a web service on Render, add `GROQ_API_KEY` as an environment variable, and deploy.
-
-## Environment Variables
-
-| Variable       | Description             | Default                   |
-| -------------- | ----------------------- | ------------------------- |
-| `GROQ_API_KEY` | Groq API key            | Required                  |
-| `MODEL_NAME`   | LLM model               | `llama-3.3-70b-versatile` |
-| `TEMPERATURE`  | LLM temperature         | `0.1`                     |
-| `MAX_TOKENS`   | Maximum response tokens | `2000`                    |
-| `PORT`         | Server port             | `8000`                    |
-| `HOST`         | Server host             | `0.0.0.0`                 |
-
-## Security
-
-* Keep API keys in environment variables.
-* Never commit `.env` files.
-* Validate incoming request data.
-* Configure CORS for your production frontend.
-* Rate limit public API endpoints.
-* Avoid logging sensitive authentication credentials.
-* Treat JWTs and API keys as sensitive request data.
-
-## Testing
-
-Check the service health:
-
-```bash
-curl http://localhost:8000/health
-```
-
-Run a debugging request:
-
-```bash
-curl -X POST http://localhost:8000/debug \
-  -H "Content-Type: application/json" \
-  -d @examples/request.json
-```
-
-## Troubleshooting
-
-### Module Not Found
-
-Make sure the virtual environment is active and dependencies are installed:
-
-```bash
-pip install -r requirements.txt
-```
-
-### Missing Groq API Key
-
-Check your `.env` file:
-
-```bash
-cat .env
-```
-
-Make sure `GROQ_API_KEY` is configured.
-
-### Port Already in Use
-
-Run the server on another port:
-
-```bash
-PORT=8001 python -m uvicorn api.main:app
-```
-
-## License
-
-MIT License.
-
-## Links
-
-Demo: [Live](https://api-analyse-fe.vercel.app/)
-Repository: [GitHub](https://github.com/Rakshit-gen/API_Analyse)
-
-Built with [LangGraph](https://github.com/langchain-ai/langgraph), [FastAPI](https://fastapi.tiangolo.com/), and [Groq](https://groq.com/).
-
+- The JWT decoder reads claims without checking the signature. It tells you what is in the token, not whether it is valid.
+- `/test-request` will call any URL you give it, including internal addresses. Do not expose it publicly without an allow list.
+- Whatever you paste, including tokens and API keys, is sent to Groq as part of the prompt.
+- CORS is open to every origin.
+- No streaming yet. `/debug` returns once the whole graph has run, usually in a few seconds.
